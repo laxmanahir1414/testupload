@@ -1,4 +1,27 @@
 /*
+
+--  i have a project Budget Managment System where user can manage budget base on financial year and its quarter wise
+		   -- user can enter budget / estimation / Actual Quarter wise
+		   -- currently user is using a add / edit angular based form for budget / estimation / actual entry
+		   -- sending form data into backend in json format and save data into database usig two store procedure ""p_BudgetEntry_Add_JSON" and "sp_BudgetEntry_Update_JSON"
+		   -- which is working perfectly and with some validation before saving data into database
+		   -- Now user wants to done this entries using excel upload , using excel user can upload budget for multiple product same time, user wants add/edit for  budget / estimation / actual data entry using exceal upload
+		   -- if we will use excel for entry there were needs more validation befor saving any transaction data
+		   -- to make it easy we have decided in excel upload form we give three radio button 1. Budget 2. Estimation 3. Actual, before sending data to sql we identify user wants entry for what
+		   -- we have three type of entry budget 1 / estimation 2 / actual 3 
+		   -- First time entry we assume it is budget entry in any quarter, after that any entry will be either estimation or actual
+		   -- First Entry is known as Budget and after that it will estimation 
+		   -- Actul entry will be always entered after estimation or budget(if it is first time) of particular quarter
+		   -- Budget entry is new entry, but estimation entry should based on previsous budget & actual
+		   -- we think if user want to enter estimation the data it should be import from database based on previous data after that user change and upload for estimation add or edit
+		   -- we think if user want to enter actual the data it should be import from database based on previous data after that user change and upload for estimation add or edit
+		   -- we have already write some validation please check these and if need to change then change it or if required to add more validation then add it
+		   -- i want the existing form for single entry is already working that also should be running independently if requiered any validation please add it into procedure
+		   -- all the validation will be in proc level
+		   -- we have year master with 2 open / 3 frozen / 4 close status and same we have 4 quarter  with 2 open / 3 frozen / 4 close status
+		   -- we have already tried to do but not completed and confident below is all details database  / UI / and table structure 
+		   -- first under stand the current structure of tabels/ proc / ui we donot want any extreme changes in structure 
+		   -- understand the requirment and provide working solution which will be the best 
 ===============================================================================
 BUDGET / ESTIMATION / ACTUAL - VERSIONED BULK SAVE
 ===============================================================================
