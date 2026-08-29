@@ -1,4 +1,14 @@
 /*
+[{"RowNumber":2,"Sr No":1,"Bugdet Code":"BUD-FY25-00001","Indus Coverage Group":"Consumer","Pitched / Is Mandated":"Pitched",
+	"Project Name":"Ganesh Tech","Mandated Company":null,"Industry":"Digital Marketing","Product":"Capital Market","Issue Type":"IPO",
+	"Indicative Deal Size (Rs Cr)":500.0,"Estimated Fee Pool (%)":25.0,"Total Fees (Rs Cr)":125.0,"No. of BRLMs":4,"JMF Keep Rate (%)":25.0,"JMF Gross Fee (Rs Cr)":31.25,
+	"Deal Probability (%)":90.0,"JM Probability (%)":80.0,"Expected Closure":"Q2","Q1":5.0,"Q2":17.5,"Q3":0.0,"Q4":0.0,"Total":22.5,"Quarter":"Q1",
+	"Amount":5.0,"Is Mannual Calculation":"NO"},{"RowNumber":3,"Sr No":2,"Bugdet Code":"BUD-FY25-00002","Indus Coverage Group":"Consumer",
+	"Pitched / Is Mandated":"Pitched","Project Name":"Team Tech","Mandated Company":null,"Industry":"Digital Marketing","Product":"Capital Market",
+	"Issue Type":"IPO","Indicative Deal Size (Rs Cr)":600.0,"Estimated Fee Pool (%)":25.0,"Total Fees (Rs Cr)":125.0,"No. of BRLMs":4,"JMF Keep Rate (%)":25.0,
+	"JMF Gross Fee (Rs Cr)":31.25,"Deal Probability (%)":90.0,"JM Probability (%)":80.0,"Expected Closure":"Q2","Q1":5.0,"Q2":17.5,"Q3":0.0,"Q4":0.0,"Total":22.5,
+	"Quarter":"Q1","Amount":5.0,"Is Mannual Calculation":"NO"}]
+----------
 {"budgetEntry_Syscode":0,"userSyscode":77,"fy_Code":1,"userEntityCompCode":1,"indusCGCode":8,
 "cproject_Code":null,"ccompany_Code":null,"cindustry_code":null,"cproject_name":"","ccompany_name":"industclie",
 "cindustry_name":"IT Industry New","product_code":1,"prodIssueType_code":6,"indicativeDealSize":500.0,"estimatedFeePool":5.0,
