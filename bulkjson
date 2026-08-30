@@ -1,0 +1,587 @@
+ALTER PROCEDURE [dbo].[sp_BudgetEntry_Bulk_Save_JSON]
+(
+    @EntryType   INT,            -- 1 Budget / 2 Estimation / 3 Actual (radio button)
+    @QuarterCode INT,            -- 1 / 2 / 3 / 4
+    @FY_Code     INT,
+    @RoleName    VARCHAR(200),
+    @Created_By  INT,
+    @Payload     NVARCHAR(MAX),  -- JSON array of Excel rows
+
+    @ExecStatus     BIT OUTPUT,
+    @ResultMessage  NVARCHAR(1000) OUTPUT
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    SET @ExecStatus = 0;
+    SET @ResultMessage = NULL;
+
+    -- ⚠ ADJUST: fee_code that receives the Excel Q1-Q4 aggregate figures.
+    DECLARE @DefaultFeeTypeCode INT = 1;
+
+    DECLARE
+        @RoleCode INT,
+        @FY_Status INT,
+        @IsCurrent BIT,
+        @QuarterStatus INT,
+        @PreviousQuarterStatus INT;
+
+    BEGIN TRY
+
+        /* ============================================================
+           1. Header validation
+           ============================================================ */
+        IF ISJSON(@Payload) <> 1
+            THROW 73000, 'Invalid JSON payload.', 1;
+        IF @EntryType NOT IN (1, 2, 3)
+            THROW 73001, 'Invalid Entry Type. 1=Budget, 2=Estimation, 3=Actual.', 1;
+        IF @QuarterCode NOT IN (1, 2, 3, 4)
+            THROW 73002, 'Invalid Quarter Code. Use 1, 2, 3 or 4.', 1;
+        IF ISNULL(@FY_Code, 0) <= 0
+            THROW 73003, 'Financial Year is required.', 1;
+        IF ISNULL(@Created_By, 0) <= 0
+            THROW 73004, 'Created By user is required.', 1;
+
+        SELECT @RoleCode = role_code FROM access.roles WHERE role_name = @RoleName AND is_active = 1;
+        IF @RoleCode IS NULL
+            THROW 73005, 'Invalid or inactive role.', 1;
+
+        SELECT @FY_Status = Status, @IsCurrent = Is_Current
+        FROM masters.FinancialYears WHERE FY_Code = @FY_Code AND is_active = 1;
+        IF @FY_Status IS NULL
+            THROW 73006, 'Invalid or inactive Financial Year.', 1;
+        IF @FY_Status = 4
+            THROW 73007, 'Financial Year is Closed. No add/update allowed.', 1;
+        IF @IsCurrent <> 1
+            THROW 73008, 'Financial Year must be marked as Current.', 1;
+
+        SELECT @QuarterStatus = Status
+        FROM masters.Quarters WHERE FY_Code = @FY_Code AND quarter_code = @QuarterCode AND is_active = 1;
+        IF @QuarterStatus IS NULL
+            THROW 73009, 'Quarter is invalid or not configured.', 1;
+        IF @QuarterStatus = 4
+            THROW 73010, 'Quarter is Closed. No add/update allowed.', 1;
+        -- Fine-grained Open/Frozen-by-role enforcement is left to
+        -- sp_BudgetEntry_Add_JSON / sp_BudgetEntry_Update_JSON (policy-flag driven)
+        -- so that logic lives in exactly one place and can never drift.
+
+        IF @QuarterCode > 1
+        BEGIN
+            SELECT @PreviousQuarterStatus = Status
+            FROM masters.Quarters
+            WHERE FY_Code = @FY_Code AND quarter_code = @QuarterCode - 1 AND is_active = 1;
+
+            IF @PreviousQuarterStatus IS NULL
+                THROW 73014, 'Previous quarter is not configured for the selected Financial Year.', 1;
+            IF @PreviousQuarterStatus = 2
+                THROW 73015, 'Previous quarter has an invalid status. It must be Frozen, or Closed.', 1;
+        END
+
+        /* ============================================================
+           2. Load Excel JSON
+           ============================================================ */
+        CREATE TABLE #Upload
+        (
+            RowNumber INT NOT NULL,
+            SrNo INT NULL,
+            BudgetCode VARCHAR(30) NULL,
+            IndusCoverageGroup NVARCHAR(200) NULL,
+            PitchedOrMandated NVARCHAR(50) NULL,
+            ProjectName NVARCHAR(200) NULL,
+            MandatedCompany NVARCHAR(200) NULL,
+            Industry NVARCHAR(200) NULL,
+            Product NVARCHAR(200) NULL,
+            IssueType NVARCHAR(200) NULL,
+            IndicativeDealSize DECIMAL(18,2) NULL,
+            EstimatedFeePool DECIMAL(18,2) NULL,
+            TotalFees DECIMAL(18,2) NULL,
+            NoOfBRLMs INT NULL,
+            JMFKeepRate DECIMAL(18,2) NULL,
+            JMFGrossFee DECIMAL(18,2) NULL,
+            DealProbability DECIMAL(18,2) NULL,
+            JMProbability DECIMAL(18,2) NULL,
+            ExpectedClosure NVARCHAR(20) NULL,
+            Q1 DECIMAL(18,2) NULL,
+            Q2 DECIMAL(18,2) NULL,
+            Q3 DECIMAL(18,2) NULL,
+            Q4 DECIMAL(18,2) NULL,
+            Total DECIMAL(18,2) NULL,
+            EntryQuarter NVARCHAR(20) NULL,
+            Amount DECIMAL(18,2) NULL,
+            IsManualCalculation VARCHAR(10) NULL
+        );
+
+        INSERT INTO #Upload
+        (
+            RowNumber, SrNo, BudgetCode, IndusCoverageGroup, PitchedOrMandated,
+            ProjectName, MandatedCompany, Industry, Product, IssueType,
+            IndicativeDealSize, EstimatedFeePool, TotalFees, NoOfBRLMs,
+            JMFKeepRate, JMFGrossFee, DealProbability, JMProbability,
+            ExpectedClosure, Q1, Q2, Q3, Q4, Total, EntryQuarter, Amount, IsManualCalculation
+        )
+        SELECT
+            TRY_CONVERT(INT, [key]) + 1,
+            TRY_CONVERT(INT, JSON_VALUE(value, '$."Sr No"')),
+            NULLIF(LTRIM(RTRIM(JSON_VALUE(value, '$."Budget Code"'))), ''),
+            NULLIF(LTRIM(RTRIM(JSON_VALUE(value, '$."Indus Coverage Group"'))), ''),
+            JSON_VALUE(value, '$."Pitched / Is Mandated"'),
+            NULLIF(LTRIM(RTRIM(JSON_VALUE(value, '$."Project Name"'))), ''),
+            NULLIF(LTRIM(RTRIM(JSON_VALUE(value, '$."Mandated Company"'))), ''),
+            NULLIF(LTRIM(RTRIM(JSON_VALUE(value, '$."Industry"'))), ''),
+            NULLIF(LTRIM(RTRIM(JSON_VALUE(value, '$."Product"'))), ''),
+            NULLIF(LTRIM(RTRIM(JSON_VALUE(value, '$."Issue Type"'))), ''),
+            TRY_CONVERT(DECIMAL(18,2), JSON_VALUE(value, '$."Indicative Deal Size (Rs Cr)"')),
+            TRY_CONVERT(DECIMAL(18,2), JSON_VALUE(value, '$."Estimated Fee Pool (%)"')),
+            TRY_CONVERT(DECIMAL(18,2), JSON_VALUE(value, '$."Total Fees (Rs Cr)"')),
+            TRY_CONVERT(INT, JSON_VALUE(value, '$."No. of BRLMs"')),
+            TRY_CONVERT(DECIMAL(18,2), JSON_VALUE(value, '$."JMF Keep Rate (%)"')),
+            TRY_CONVERT(DECIMAL(18,2), JSON_VALUE(value, '$."JMF Gross Fee (Rs Cr)"')),
+            TRY_CONVERT(DECIMAL(18,2), JSON_VALUE(value, '$."Deal Probability (%)"')),
+            TRY_CONVERT(DECIMAL(18,2), JSON_VALUE(value, '$."JM Probability (%)"')),
+            JSON_VALUE(value, '$."Expected Closure"'),
+            TRY_CONVERT(DECIMAL(18,2), JSON_VALUE(value, '$."Q1"')),
+            TRY_CONVERT(DECIMAL(18,2), JSON_VALUE(value, '$."Q2"')),
+            TRY_CONVERT(DECIMAL(18,2), JSON_VALUE(value, '$."Q3"')),
+            TRY_CONVERT(DECIMAL(18,2), JSON_VALUE(value, '$."Q4"')),
+            TRY_CONVERT(DECIMAL(18,2), JSON_VALUE(value, '$."Total"')),
+            JSON_VALUE(value, '$."Quarter"'),
+            TRY_CONVERT(DECIMAL(18,2), JSON_VALUE(value, '$."Amount"')),
+            JSON_VALUE(value, '$."Is Mannual Calculation"')
+        FROM OPENJSON(@Payload);
+
+        IF NOT EXISTS (SELECT 1 FROM #Upload)
+            THROW 73016, 'No budget records found in uploaded file.', 1;
+
+        /* ============================================================
+           3. Phase 1 — structural validation (no DB state needed)
+           ============================================================ */
+        CREATE TABLE #ValidationErrors
+        (
+            RowNumber INT NOT NULL,
+            BudgetCode VARCHAR(30) NULL,
+            ErrorMessage NVARCHAR(1000) NOT NULL
+        );
+
+        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+        SELECT RowNumber, BudgetCode, 'Budget Code is required.'
+        FROM #Upload WHERE BudgetCode IS NULL;
+
+        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+        SELECT u.RowNumber, u.BudgetCode, 'Duplicate Budget Code found in this Excel batch.'
+        FROM #Upload u
+        INNER JOIN (
+            SELECT BudgetCode FROM #Upload WHERE BudgetCode IS NOT NULL
+            GROUP BY BudgetCode HAVING COUNT(*) > 1
+        ) d ON d.BudgetCode = u.BudgetCode;
+
+        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+        SELECT RowNumber, BudgetCode, 'Project Name or Mandated Company is required.'
+        FROM #Upload
+        WHERE ProjectName IS NULL AND MandatedCompany IS NULL;
+
+        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+        SELECT RowNumber, BudgetCode, 'Deal Probability (%) must be between 0 and 100.'
+        FROM #Upload WHERE DealProbability IS NOT NULL AND (DealProbability < 0 OR DealProbability > 100);
+
+        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+        SELECT RowNumber, BudgetCode, 'JM Probability (%) must be between 0 and 100.'
+        FROM #Upload WHERE JMProbability IS NOT NULL AND (JMProbability < 0 OR JMProbability > 100);
+
+        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+        SELECT RowNumber, BudgetCode, 'Indicative Deal Size cannot be negative.'
+        FROM #Upload WHERE IndicativeDealSize IS NOT NULL AND IndicativeDealSize < 0;
+
+        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+        SELECT RowNumber, BudgetCode, 'Row Quarter (' + EntryQuarter + ') does not match the selected upload quarter.'
+        FROM #Upload
+        WHERE EntryQuarter IS NOT NULL
+          AND TRY_CONVERT(INT, REPLACE(UPPER(EntryQuarter), 'Q', '')) <> @QuarterCode;
+
+        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+        SELECT RowNumber, BudgetCode, 'Expected Closure "' + ExpectedClosure + '" is not a valid quarter (Q1-Q4).'
+        FROM #Upload
+        WHERE ExpectedClosure IS NOT NULL
+          AND TRY_CONVERT(INT, REPLACE(UPPER(ExpectedClosure), 'Q', '')) NOT IN (1,2,3,4);
+
+        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+        SELECT RowNumber, BudgetCode, 'Expected Closure quarter cannot be earlier than the entry quarter.'
+        FROM #Upload
+        WHERE ExpectedClosure IS NOT NULL
+          AND TRY_CONVERT(INT, REPLACE(UPPER(ExpectedClosure), 'Q', '')) BETWEEN 1 AND 4
+          AND TRY_CONVERT(INT, REPLACE(UPPER(ExpectedClosure), 'Q', '')) < @QuarterCode;
+
+        -- ⚠ ADJUST the 3 lookups below to your real master table/column names.
+        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+        SELECT u.RowNumber, u.BudgetCode, 'Product "' + u.Product + '" was not found in the Product master.'
+        FROM #Upload u
+        WHERE u.Product IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM masters.Product p WHERE p.Product_Name = u.Product AND p.is_active = 1);
+
+        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+        SELECT u.RowNumber, u.BudgetCode, 'Issue Type "' + u.IssueType + '" was not found in the Issue Type master.'
+        FROM #Upload u
+        WHERE u.IssueType IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM masters.ProdIssueType t WHERE t.IssueType_Name = u.IssueType AND t.is_active = 1);
+
+        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+        SELECT u.RowNumber, u.BudgetCode, 'Indus Coverage Group "' + u.IndusCoverageGroup + '" was not found in the master.'
+        FROM #Upload u
+        WHERE u.IndusCoverageGroup IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM masters.IndusCoverageGroup g WHERE g.IndusCG_Name = u.IndusCoverageGroup AND g.is_active = 1);
+
+        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+        SELECT u.RowNumber, u.BudgetCode, 'Product, Issue Type and Indus Coverage Group are required for a new Budget Code.'
+        FROM #Upload u
+        WHERE @EntryType = 1
+          AND NOT EXISTS (SELECT 1 FROM dbo.BudgetEntryGroupMaster gm WHERE gm.Budget_Code = u.BudgetCode)
+          AND (u.Product IS NULL OR u.IssueType IS NULL OR u.IndusCoverageGroup IS NULL);
+
+        IF EXISTS (SELECT 1 FROM #ValidationErrors)
+        BEGIN
+            SELECT RowNumber, BudgetCode, ErrorMessage FROM #ValidationErrors ORDER BY RowNumber, ErrorMessage;
+            SET @ExecStatus = 0;
+            SET @ResultMessage = 'Excel validation failed. No Budget, Estimation or Actual records were saved.';
+            RETURN;
+        END;
+
+        /* ============================================================
+           4. Phase 2 — lifecycle validation + per-row ADD/EDIT resolution
+           ============================================================ */
+        CREATE TABLE #RowPlan
+        (
+            RowNumber INT PRIMARY KEY,
+            BudgetCode VARCHAR(30) NOT NULL,
+            BudgetEGMasterSyscode BIGINT NULL,       -- NULL = brand-new Budget Code
+            ExistingEntrySyscode BIGINT NULL,        -- NULL = ADD via Add_JSON, else EDIT/version via Update_JSON
+            BudgetBaselineEntrySyscode BIGINT NULL,  -- for Actual
+            ProductCode INT NULL,
+            IssueTypeCode INT NULL,
+            IndusCGCode INT NULL
+        );
+
+        DECLARE @r_RowNumber INT, @r_BudgetCode VARCHAR(30);
+        DECLARE PlanCursor CURSOR LOCAL FAST_FORWARD FOR
+            SELECT RowNumber, BudgetCode FROM #Upload ORDER BY RowNumber;
+        OPEN PlanCursor;
+        FETCH NEXT FROM PlanCursor INTO @r_RowNumber, @r_BudgetCode;
+
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            DECLARE
+                @p_MasterSys BIGINT = NULL,
+                @p_ExistingEntrySys BIGINT = NULL,
+                @p_BaselineEntrySys BIGINT = NULL,
+                @p_BudgetEntrySys BIGINT = NULL,
+                @p_BudgetQuarter INT = NULL,
+                @p_EstimationEntrySys BIGINT = NULL,
+                @p_ProductCode INT = NULL,
+                @p_IssueTypeCode INT = NULL,
+                @p_IndusCGCode INT = NULL,
+                @p_ExcelProduct NVARCHAR(200), @p_ExcelIssueType NVARCHAR(200), @p_ExcelIndusCG NVARCHAR(200);
+
+            SELECT @p_ExcelProduct = Product, @p_ExcelIssueType = IssueType, @p_ExcelIndusCG = IndusCoverageGroup
+            FROM #Upload WHERE RowNumber = @r_RowNumber;
+
+            -- ⚠ ADJUST (same 3 lookups as Phase 1)
+            IF @p_ExcelProduct IS NOT NULL
+                SELECT @p_ProductCode = Product_code FROM masters.Product WHERE Product_Name = @p_ExcelProduct;
+            IF @p_ExcelIssueType IS NOT NULL
+                SELECT @p_IssueTypeCode = ProdIssueType_code FROM masters.ProdIssueType WHERE IssueType_Name = @p_ExcelIssueType;
+            IF @p_ExcelIndusCG IS NOT NULL
+                SELECT @p_IndusCGCode = IndusCGCode FROM masters.IndusCoverageGroup WHERE IndusCG_Name = @p_ExcelIndusCG;
+
+            SELECT @p_MasterSys = BudgetEGMaster_syscode
+            FROM dbo.BudgetEntryGroupMaster
+            WHERE Budget_Code = @r_BudgetCode AND ISNULL(is_active,1) = 1;
+
+            IF @p_MasterSys IS NULL
+            BEGIN
+                -- Brand-new Budget Code. Per your rule: "first time entry we assume
+                -- it is budget entry" -- only Budget can create a new code.
+                IF @EntryType <> 1
+                    INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+                    VALUES (@r_RowNumber, @r_BudgetCode, 'Budget Code does not exist. Estimation or Actual requires an existing Budget.');
+                -- ExistingEntrySyscode stays NULL -> ADD path (sp_BudgetEntry_Add_JSON creates the Master + Group + Entry)
+            END
+            ELSE
+            BEGIN
+                -- Existing code: find its Budget (BET_Code=1) stream, if any.
+                SELECT TOP (1) @p_BudgetEntrySys = be.BudgetEntry_Syscode, @p_BudgetQuarter = be.quarter_code
+                FROM dbo.BudgetEntry be
+                INNER JOIN dbo.BudgetEntryGroup beg ON beg.BudgetEntryGroup_Syscode = be.BudgetEntryGroup_Syscode
+                WHERE beg.BudgetEGMaster_syscode = @p_MasterSys AND beg.BET_Code = 1
+                  AND ISNULL(beg.Is_Deleted,0) = 0 AND ISNULL(be.Is_Deleted,0) = 0
+                ORDER BY be.BudgetEntry_Syscode DESC;
+
+                IF @EntryType = 1
+                BEGIN
+                    -- A Budget Code has exactly one Budget stream, ever. If it exists,
+                    -- this row revises it (EDIT); Update_JSON handles the versioning.
+                    SET @p_ExistingEntrySys = @p_BudgetEntrySys;
+                END
+                ELSE IF @EntryType = 2
+                BEGIN
+                    IF @p_BudgetEntrySys IS NULL
+                        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+                        VALUES (@r_RowNumber, @r_BudgetCode, 'Budget Code does not have an existing Budget entry. Estimation requires a Budget first.');
+                    ELSE IF EXISTS (
+                        SELECT 1 FROM dbo.BudgetEntry a
+                        INNER JOIN dbo.BudgetEntryGroup ag ON ag.BudgetEntryGroup_Syscode = a.BudgetEntryGroup_Syscode
+                        WHERE ag.BudgetEGMaster_syscode = @p_MasterSys AND ag.BET_Code = 3
+                          AND a.quarter_code = @QuarterCode
+                          AND ISNULL(ag.Is_Deleted,0) = 0 AND ISNULL(a.Is_Deleted,0) = 0
+                    )
+                        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+                        VALUES (@r_RowNumber, @r_BudgetCode, 'Actual already exists for this quarter; Estimation can no longer be edited.');
+                    ELSE
+                        SELECT TOP (1) @p_ExistingEntrySys = be.BudgetEntry_Syscode
+                        FROM dbo.BudgetEntry be
+                        INNER JOIN dbo.BudgetEntryGroup beg ON beg.BudgetEntryGroup_Syscode = be.BudgetEntryGroup_Syscode
+                        WHERE beg.BudgetEGMaster_syscode = @p_MasterSys AND beg.BET_Code = 2
+                          AND be.quarter_code = @QuarterCode
+                          AND ISNULL(beg.Is_Deleted,0) = 0 AND ISNULL(be.Is_Deleted,0) = 0
+                        ORDER BY be.BudgetEntry_Syscode DESC;
+                END
+                ELSE -- EntryType = 3, Actual
+                BEGIN
+                    IF @p_BudgetEntrySys IS NULL
+                        INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+                        VALUES (@r_RowNumber, @r_BudgetCode, 'Budget Code does not have an existing Budget entry. Actual requires a Budget baseline.');
+                    ELSE
+                    BEGIN
+                        SET @p_BaselineEntrySys = @p_BudgetEntrySys;
+
+                        SELECT TOP (1) @p_EstimationEntrySys = be.BudgetEntry_Syscode
+                        FROM dbo.BudgetEntry be
+                        INNER JOIN dbo.BudgetEntryGroup beg ON beg.BudgetEntryGroup_Syscode = be.BudgetEntryGroup_Syscode
+                        WHERE beg.BudgetEGMaster_syscode = @p_MasterSys AND beg.BET_Code = 2
+                          AND be.quarter_code = @QuarterCode
+                          AND ISNULL(beg.Is_Deleted,0) = 0 AND ISNULL(be.Is_Deleted,0) = 0
+                        ORDER BY be.BudgetEntry_Syscode DESC;
+
+                        -- ⚠ ACTUAL BASELINE RULE: Actual for THIS quarter is allowed
+                        -- without an Estimation only when this quarter is the Budget's
+                        -- own quarter and no Estimation was ever made for it. Every
+                        -- other quarter must be estimated first.
+                        IF @p_EstimationEntrySys IS NULL AND @QuarterCode <> @p_BudgetQuarter
+                            INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+                            VALUES (@r_RowNumber, @r_BudgetCode, 'Estimation must exist for this quarter before Actual can be entered.');
+
+                        SELECT TOP (1) @p_ExistingEntrySys = be.BudgetEntry_Syscode
+                        FROM dbo.BudgetEntry be
+                        INNER JOIN dbo.BudgetEntryGroup beg ON beg.BudgetEntryGroup_Syscode = be.BudgetEntryGroup_Syscode
+                        WHERE beg.BudgetEGMaster_syscode = @p_MasterSys AND beg.BET_Code = 3
+                          AND be.quarter_code = @QuarterCode
+                          AND ISNULL(beg.Is_Deleted,0) = 0 AND ISNULL(be.Is_Deleted,0) = 0
+                        ORDER BY be.BudgetEntry_Syscode DESC;
+                    END
+                END
+
+                -- Same "pending approval" guard Add_JSON/Update_JSON apply for the
+                -- single form, checked here too so bulk gives the same clear error
+                -- up front instead of failing mid-transaction.
+                IF @p_ExistingEntrySys IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM dbo.BudgetEntry WHERE BudgetEntry_Syscode = @p_ExistingEntrySys AND Status = 0
+                )
+                    INSERT INTO #ValidationErrors (RowNumber, BudgetCode, ErrorMessage)
+                    VALUES (@r_RowNumber, @r_BudgetCode, 'A change request is already pending approval for this Budget Code / stage / quarter.');
+
+                -- "Estimation/Actual should import from previous data": if the Excel
+                -- row left Product/IssueType/IndusCG blank, carry them forward from
+                -- whichever row we're editing or basing this on.
+                IF @p_ProductCode IS NULL OR @p_IssueTypeCode IS NULL OR @p_IndusCGCode IS NULL
+                BEGIN
+                    DECLARE @src BIGINT = COALESCE(@p_ExistingEntrySys, @p_EstimationEntrySys, @p_BudgetEntrySys);
+                    IF @src IS NOT NULL
+                    BEGIN
+                        SELECT
+                            @p_ProductCode   = COALESCE(@p_ProductCode, Product_code),
+                            @p_IssueTypeCode = COALESCE(@p_IssueTypeCode, ProdIssueType_code)
+                        FROM dbo.BudgetEntry WHERE BudgetEntry_Syscode = @src;
+
+                        SELECT @p_IndusCGCode = COALESCE(@p_IndusCGCode, beg.IndusCGCode)
+                        FROM dbo.BudgetEntry be
+                        INNER JOIN dbo.BudgetEntryGroup beg ON beg.BudgetEntryGroup_Syscode = be.BudgetEntryGroup_Syscode
+                        WHERE be.BudgetEntry_Syscode = @src;
+                    END
+                END
+            END
+
+            INSERT INTO #RowPlan (RowNumber, BudgetCode, BudgetEGMasterSyscode, ExistingEntrySyscode, BudgetBaselineEntrySyscode, ProductCode, IssueTypeCode, IndusCGCode)
+            VALUES (@r_RowNumber, @r_BudgetCode, @p_MasterSys, @p_ExistingEntrySys, @p_BaselineEntrySys, @p_ProductCode, @p_IssueTypeCode, @p_IndusCGCode);
+
+            FETCH NEXT FROM PlanCursor INTO @r_RowNumber, @r_BudgetCode;
+        END;
+        CLOSE PlanCursor; DEALLOCATE PlanCursor;
+
+        IF EXISTS (SELECT 1 FROM #ValidationErrors)
+        BEGIN
+            SELECT RowNumber, BudgetCode, ErrorMessage FROM #ValidationErrors ORDER BY RowNumber, ErrorMessage;
+            SET @ExecStatus = 0;
+            SET @ResultMessage = 'Excel validation failed. No Budget, Estimation or Actual records were saved.';
+            RETURN;
+        END;
+
+        /* ============================================================
+           5. Phase 3 — save everything in ONE transaction, delegating
+              every actual write to the existing single-row procs.
+           ============================================================ */
+        BEGIN TRANSACTION;
+
+        DECLARE
+            @x_RowNumber INT, @x_BudgetCode VARCHAR(30), @x_MasterSys BIGINT,
+            @x_ExistingEntrySys BIGINT, @x_BaselineEntrySys BIGINT,
+            @x_ProductCode INT, @x_IssueTypeCode INT, @x_IndusCGCode INT,
+            @WorkerPayload NVARCHAR(MAX), @WorkerStatus BIT, @WorkerMessage NVARCHAR(500),
+            @WorkerBudgetCode NVARCHAR(30);
+
+        CREATE TABLE #SaveResult (RowNumber INT, BudgetCode VARCHAR(30), SaveStatus VARCHAR(20));
+
+        DECLARE SaveCursor CURSOR LOCAL FAST_FORWARD FOR
+            SELECT RowNumber, BudgetCode, BudgetEGMasterSyscode, ExistingEntrySyscode,
+                   BudgetBaselineEntrySyscode, ProductCode, IssueTypeCode, IndusCGCode
+            FROM #RowPlan ORDER BY RowNumber;
+
+        OPEN SaveCursor;
+        FETCH NEXT FROM SaveCursor INTO @x_RowNumber, @x_BudgetCode, @x_MasterSys, @x_ExistingEntrySys,
+                                          @x_BaselineEntrySys, @x_ProductCode, @x_IssueTypeCode, @x_IndusCGCode;
+
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            SET @WorkerStatus = 0; SET @WorkerMessage = NULL; SET @WorkerBudgetCode = NULL;
+
+            IF @x_ExistingEntrySys IS NOT NULL
+            BEGIN
+                -- EDIT: version the existing stream via the proven Update_JSON proc.
+                SET @WorkerPayload = (
+                    SELECT
+                        @Created_By AS userSyscode,
+                        @x_ExistingEntrySys AS budgetEntry_Syscode,
+                        @QuarterCode AS quarter_code,
+                        TRY_CONVERT(INT, REPLACE(UPPER(u.ExpectedClosure), 'Q', '')) AS expectedClosure,
+                        @x_ProductCode AS product_code,
+                        @x_IssueTypeCode AS prodIssueType_code,
+                        u.IndicativeDealSize AS indicativeDealSize,
+                        u.EstimatedFeePool AS estimatedFeePool,
+                        u.TotalFees AS totalFees,
+                        u.NoOfBRLMs AS noOfBRLMs,
+                        u.JMFKeepRate AS jmfKeepRate,
+                        u.JMFGrossFee AS jmfGrossFee,
+                        u.DealProbability AS dealProbability,
+                        u.JMProbability AS jmProbability,
+                        u.Q1 AS q1Fees, u.Q2 AS q2Fees, u.Q3 AS q3Fees, u.Q4 AS q4Fees,
+                        ISNULL(u.Total, ISNULL(u.Q1,0)+ISNULL(u.Q2,0)+ISNULL(u.Q3,0)+ISNULL(u.Q4,0)) AS totalEstimate,
+                        u.ProjectName AS cproject_name,
+                        u.MandatedCompany AS ccompany_name,
+                        u.Industry AS cindustry_name,
+                        CASE WHEN u.PitchedOrMandated LIKE '%Mandat%' THEN 1 ELSE 0 END AS isMandated,
+                        ISNULL(u.Amount, u.Total) AS fee_amount,
+                        N'' AS remarks,
+                        0 AS net_amount,
+                        @RoleCode AS roleCode
+                    FROM #Upload u WHERE u.RowNumber = @x_RowNumber
+                    FOR JSON PATH, WITHOUT_ARRAY_WRAPPER
+                );
+
+                SET @WorkerPayload = JSON_MODIFY(@WorkerPayload, '$.fee_dtls', JSON_QUERY((
+                    SELECT @DefaultFeeTypeCode AS fee_code, u.Q1 AS Q1fee, u.Q2 AS Q2fee, u.Q3 AS Q3fee, u.Q4 AS Q4fee
+                    FROM #Upload u WHERE u.RowNumber = @x_RowNumber
+                    FOR JSON PATH
+                )));
+                SET @WorkerPayload = JSON_MODIFY(@WorkerPayload, '$.fee_sharing_dtls', JSON_QUERY('[]'));
+
+                EXEC dbo.sp_BudgetEntry_Update_JSON
+                    @Payload = @WorkerPayload,
+                    @ExecStatus = @WorkerStatus OUTPUT,
+                    @ResultMessage = @WorkerMessage OUTPUT;
+
+                SET @WorkerBudgetCode = @x_BudgetCode;
+            END
+            ELSE
+            BEGIN
+                -- ADD: brand-new Budget Code, or the first Estimation/Actual for an
+                -- existing code that never had this stage/quarter before.
+                SET @WorkerPayload = (
+                    SELECT
+                        @Created_By AS userSyscode,
+                        @FY_Code AS fy_Code,
+                        1 AS userEntityCompCode,
+                        @x_IndusCGCode AS indusCGCode,
+                        u.ProjectName AS cproject_name,
+                        u.MandatedCompany AS ccompany_name,
+                        u.Industry AS cindustry_name,
+                        @x_ProductCode AS product_code,
+                        @x_IssueTypeCode AS prodIssueType_code,
+                        u.IndicativeDealSize AS indicativeDealSize,
+                        u.EstimatedFeePool AS estimatedFeePool,
+                        u.TotalFees AS totalFees,
+                        u.NoOfBRLMs AS noOfBRLMs,
+                        u.JMFKeepRate AS jmfKeepRate,
+                        u.JMFGrossFee AS jmfGrossFee,
+                        u.DealProbability AS dealProbability,
+                        u.JMProbability AS jmProbability,
+                        TRY_CONVERT(INT, REPLACE(UPPER(u.ExpectedClosure), 'Q', '')) AS expectedClosure,
+                        @x_BaselineEntrySys AS budgetBaseline_BEntrySys,
+                        @RoleCode AS roleCode,
+                        @EntryType AS bet_Code,
+                        @QuarterCode AS quarter_code,
+                        u.Q1 AS q1Fees, u.Q2 AS q2Fees, u.Q3 AS q3Fees, u.Q4 AS q4Fees,
+                        ISNULL(u.Total, ISNULL(u.Q1,0)+ISNULL(u.Q2,0)+ISNULL(u.Q3,0)+ISNULL(u.Q4,0)) AS totalEstimate,
+                        CASE WHEN u.PitchedOrMandated LIKE '%Mandat%' THEN 1 ELSE 0 END AS isMandated,
+                        0 AS budgetEntry_Syscode,
+                        0 AS net_amount,
+                        ISNULL(u.Amount, u.Total) AS fee_amount,
+                        N'' AS remarks,
+                        ISNULL(@x_MasterSys, 0) AS budgetEGMaster_syscode
+                    FROM #Upload u WHERE u.RowNumber = @x_RowNumber
+                    FOR JSON PATH, WITHOUT_ARRAY_WRAPPER
+                );
+
+                SET @WorkerPayload = JSON_MODIFY(@WorkerPayload, '$.fee_dtls', JSON_QUERY((
+                    SELECT @DefaultFeeTypeCode AS fee_code, u.Q1 AS Q1fee, u.Q2 AS Q2fee, u.Q3 AS Q3fee, u.Q4 AS Q4fee
+                    FROM #Upload u WHERE u.RowNumber = @x_RowNumber
+                    FOR JSON PATH
+                )));
+                SET @WorkerPayload = JSON_MODIFY(@WorkerPayload, '$.fee_sharing_dtls', JSON_QUERY('[]'));
+
+                EXEC dbo.sp_BudgetEntry_Add_JSON
+                    @Payload = @WorkerPayload,
+                    @ExecStatus = @WorkerStatus OUTPUT,
+                    @ResultMessage = @WorkerMessage OUTPUT,
+                    @BudgetCode = @x_BudgetCode OUTPUT;
+
+                SET @WorkerBudgetCode = @x_BudgetCode;
+            END
+
+            IF ISNULL(@WorkerStatus, 0) = 0
+                THROW 73023, @WorkerMessage, 1;
+
+            INSERT INTO #SaveResult (RowNumber, BudgetCode, SaveStatus)
+            VALUES (@x_RowNumber, ISNULL(@WorkerBudgetCode, @x_BudgetCode),
+                    CASE WHEN @x_ExistingEntrySys IS NOT NULL THEN 'VERSION_CREATED' ELSE 'CREATED' END);
+
+            FETCH NEXT FROM SaveCursor INTO @x_RowNumber, @x_BudgetCode, @x_MasterSys, @x_ExistingEntrySys,
+                                              @x_BaselineEntrySys, @x_ProductCode, @x_IssueTypeCode, @x_IndusCGCode;
+        END;
+        CLOSE SaveCursor; DEALLOCATE SaveCursor;
+
+        COMMIT TRANSACTION;
+
+        SET @ExecStatus = 1;
+        SET @ResultMessage = 'All rows were saved successfully.';
+        SELECT RowNumber, BudgetCode, SaveStatus FROM #SaveResult ORDER BY RowNumber;
+
+    END TRY
+    BEGIN CATCH
+        IF CURSOR_STATUS('local','PlanCursor') >= -1 BEGIN CLOSE PlanCursor; DEALLOCATE PlanCursor; END;
+        IF CURSOR_STATUS('local','SaveCursor') >= -1 BEGIN CLOSE SaveCursor; DEALLOCATE SaveCursor; END;
+        IF XACT_STATE() <> 0 ROLLBACK TRANSACTION;
+
+        DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE(), @ErrorNumber INT = ERROR_NUMBER(), @ErrorLine INT = ERROR_LINE();
+        SET @ExecStatus = 0;
+        SET @ResultMessage = CONCAT('Bulk save failed. Error ', @ErrorNumber, ' at line ', @ErrorLine, ': ', @ErrorMessage);
+
+        SELECT CAST(NULL AS INT) AS RowNumber, CAST(NULL AS VARCHAR(30)) AS BudgetCode, 'FAILED' AS SaveStatus, @ResultMessage AS ErrorMessage;
+    END CATCH
+END;
