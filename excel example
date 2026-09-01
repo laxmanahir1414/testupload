@@ -1,0 +1,167 @@
+import * as XLSX from 'xlsx';
+
+/** One row of exported data — shape it to match whatever columns your SQL query returns. */
+export interface BudgetExportRow {
+  srNo: number;
+  budgetCode: string;
+  indusCoverage: string;
+  pitchedOrMandated: string;
+  projectName: string;
+  mandatedCompany: string;
+  industry: string;
+  product: string;
+  issueType: string;
+  indicativeDeal1: number;
+  estimatedFee1: number;
+  totalFees1: number;
+  indicativeDeal2: number;
+  estimatedFee2: number;
+  totalFees2: number;
+  noOfBRLMs: number;
+  jmfKeep: number;
+  jmfGross: number;
+  q1: number;
+  q2: number;
+  q3: number;
+  q4: number;
+  leadLeft: number;
+  leadTotal: number;
+  isManual: string;
+}
+
+export function exportBudgetExcel(rows: BudgetExportRow[], fileName = 'budget-export.xlsx'): void {
+  // ---- Row 1 + Row 2 header, matching the template image column-for-column ----
+  const headerRow1: (string | null)[] = [
+    'Sr No', 'Budget Code', 'Indus Coverage', 'Pitched / Is', 'Project Name', 'Mandated',
+    'Industry', 'Product', 'Issue Type',
+    'Indicative Deal', 'Estimated Fee', 'Total Fees (Rs)',
+    'Indicative Deal', 'Estimated Fee', 'Total Fees (Rs)',
+    'No. of BRLMs', 'JMF Keep', 'JMF Gross',
+    'Quarters', null, null, null,   // S1:V1 — group title, merged
+    'Lead', null,                    // W1:X1 — group title, merged
+    'IS manual'
+  ];
+
+  const headerRow2: (string | null)[] = [
+    null, null, null, null, null, null, null, null, null,
+    null, null, null, null, null, null, null, null, null,
+    'Q1', 'Q2', 'Q3', 'Q4',
+    'Left', 'Total',
+    null
+  ];
+
+  // ---- data rows, same column order as the headers above ----
+  const dataRows = rows.map(r => [
+    r.srNo, r.budgetCode, r.indusCoverage, r.pitchedOrMandated, r.projectName, r.mandatedCompany,
+    r.industry, r.product, r.issueType,
+    r.indicativeDeal1, r.estimatedFee1, r.totalFees1,
+    r.indicativeDeal2, r.estimatedFee2, r.totalFees2,
+    r.noOfBRLMs, r.jmfKeep, r.jmfGross,
+    r.q1, r.q2, r.q3, r.q4,
+    r.leadLeft, r.leadTotal,
+    r.isManual
+  ]);
+
+  const sheetData = [headerRow1, headerRow2, ...dataRows];
+  const ws = XLSX.utils.aoa_to_sheet(sheetData);
+
+  // ---- merges: every single-title column spans both header rows;
+  //      "Quarters" spans S1:V1, "Lead" spans W1:X1 ----
+  const singleColumnIndexes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 24];
+  ws['!merges'] = [
+    ...singleColumnIndexes.map(c => ({ s: { r: 0, c }, e: { r: 1, c } })),
+    { s: { r: 0, c: 18 }, e: { r: 0, c: 21 } }, // Quarters
+    { s: { r: 0, c: 22 }, e: { r: 0, c: 23 } }  // Lead
+  ];
+
+  ws['!cols'] = sheetData[0].map(() => ({ wch: 14 })); // optional, just for readability
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Budget Export');
+  XLSX.writeFile(wb, fileName);
+}
+-------------
+import * as XLSX from 'xlsx';
+
+/** One row of exported data — shape it to match whatever columns your SQL query returns. */
+export interface BudgetExportRow {
+  srNo: number;
+  budgetCode: string;
+  indusCoverage: string;
+  pitchedOrMandated: string;
+  projectName: string;
+  mandatedCompany: string;
+  industry: string;
+  product: string;
+  issueType: string;
+  indicativeDeal1: number;
+  estimatedFee1: number;
+  totalFees1: number;
+  indicativeDeal2: number;
+  estimatedFee2: number;
+  totalFees2: number;
+  noOfBRLMs: number;
+  jmfKeep: number;
+  jmfGross: number;
+  q1: number;
+  q2: number;
+  q3: number;
+  q4: number;
+  leadLeft: number;
+  leadTotal: number;
+  isManual: string;
+}
+
+export function exportBudgetExcel(rows: BudgetExportRow[], fileName = 'budget-export.xlsx'): void {
+  // ---- Row 1 + Row 2 header, matching the template image column-for-column ----
+  const headerRow1: (string | null)[] = [
+    'Sr No', 'Budget Code', 'Indus Coverage', 'Pitched / Is', 'Project Name', 'Mandated',
+    'Industry', 'Product', 'Issue Type',
+    'Indicative Deal', 'Estimated Fee', 'Total Fees (Rs)',
+    'Indicative Deal', 'Estimated Fee', 'Total Fees (Rs)',
+    'No. of BRLMs', 'JMF Keep', 'JMF Gross',
+    'Quarters', null, null, null,   // S1:V1 — group title, merged
+    'Lead', null,                    // W1:X1 — group title, merged
+    'IS manual'
+  ];
+
+  const headerRow2: (string | null)[] = [
+    null, null, null, null, null, null, null, null, null,
+    null, null, null, null, null, null, null, null, null,
+    'Q1', 'Q2', 'Q3', 'Q4',
+    'Left', 'Total',
+    null
+  ];
+
+  // ---- data rows, same column order as the headers above ----
+  const dataRows = rows.map(r => [
+    r.srNo, r.budgetCode, r.indusCoverage, r.pitchedOrMandated, r.projectName, r.mandatedCompany,
+    r.industry, r.product, r.issueType,
+    r.indicativeDeal1, r.estimatedFee1, r.totalFees1,
+    r.indicativeDeal2, r.estimatedFee2, r.totalFees2,
+    r.noOfBRLMs, r.jmfKeep, r.jmfGross,
+    r.q1, r.q2, r.q3, r.q4,
+    r.leadLeft, r.leadTotal,
+    r.isManual
+  ]);
+
+  const sheetData = [headerRow1, headerRow2, ...dataRows];
+  const ws = XLSX.utils.aoa_to_sheet(sheetData);
+
+  // ---- merges: every single-title column spans both header rows;
+  //      "Quarters" spans S1:V1, "Lead" spans W1:X1 ----
+  const singleColumnIndexes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 24];
+  ws['!merges'] = [
+    ...singleColumnIndexes.map(c => ({ s: { r: 0, c }, e: { r: 1, c } })),
+    { s: { r: 0, c: 18 }, e: { r: 0, c: 21 } }, // Quarters
+    { s: { r: 0, c: 22 }, e: { r: 0, c: 23 } }  // Lead
+  ];
+
+  ws['!cols'] = sheetData[0].map(() => ({ wch: 14 })); // optional, just for readability
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Budget Export');
+  XLSX.writeFile(wb, fileName);
+}
+
+====================------------------
