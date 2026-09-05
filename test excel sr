@@ -1,0 +1,813 @@
+import { Component, Inject, EventEmitter, Input, Output  } from '@angular/core';
+import { ExcelRow } from 'src/app/models/excel-row.model';
+import { ExcelValidatorService } from 'src/app/services/shared/excel-validator.service';
+import { apiService } from 'src/app/services/api/api.service';
+import * as ExcelJS from 'exceljs';
+import { saveAs } from 'file-saver';
+import { BulkUploadRow,RowResult,UploadResponse  } from 'src/app/models/budget-data-model';
+
+
+@Component({
+  selector: 'app-budget-entry-upload',
+  templateUrl: './budget-entry-upload.component.html',
+  styleUrls: ['./budget-entry-upload.component.scss'],
+	standalone: false
+})
+export class BudgetEntryUploadComponent {
+
+  @Input() parentData: any;
+  @Output() closed = new EventEmitter<boolean>();
+
+  selectedType: number = 1;
+  selectedFile: File | null = null;
+
+  templateError: string | null = null;
+  rows: ExcelRow[] = [];
+  columns: string[] = [];
+
+  isValidating = false;
+  isSubmitting = false;
+  submitMessage: string | null = null;
+  submitSuccess = false;
+  extracting = false;
+  serverMessage: string | null = null;
+  serverSuccess=false;
+
+  constructor(
+    private excelValidator: ExcelValidatorService,
+    private uploadService: apiService
+  ) {}
+
+  get hasClientErrors(): boolean {
+    return this.rows.some(r => r.hasError);
+  }
+
+  get errorRowCount(): number {
+    return this.rows.filter(r => r.hasError).length;
+  }
+
+  onFileSelected(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    this.selectedFile = input.files?.[0] ?? null;
+    this.resetGrid();
+  }
+
+  async validateExcel(): Promise<void> {
+    if (!this.selectedFile) return;
+
+    this.isValidating = true;
+    this.resetGrid();
+debugger;
+    try {
+      const result = await this.excelValidator.parseAndValidate(this.selectedFile);
+
+      if (!result.templateValid) {
+        this.templateError = result.templateError;
+        return;
+      }
+      debugger;
+      this.rows = result.rows;
+      this.columns = result.columns;
+    } catch (err) {
+      this.templateError = 'Could not read the file. Please make sure it is a valid .xlsx/.xls file.';
+      console.error(err);
+    } finally {
+      this.isValidating = false;
+    }
+  }
+
+  submit(): void {
+
+    debugger;
+    if (this.hasClientErrors || !this.rows.length || this.isSubmitting) return;
+
+    this.isSubmitting = true;
+    this.submitMessage = null;
+    this.submitSuccess = false;
+
+    const payload = {
+      entrytype: this.selectedType,
+      rows: this.rows.map(r => r.data),
+      yearcode: this.parentData.fycode,       
+      quartercode: this.parentData.quartercode, 
+      rolename: this.parentData.rolename
+    };
+
+    this.uploadService.uploadData(payload as any).subscribe({
+      next: (res: UploadResponse) => {
+        this.isSubmitting = false;
+    debugger;
+        if (res.rows?.some(r => r.errors?.length)) {
+          // merge server-side errors back into the same grid
+          const errorMap = new Map(res.rows.map(r => [r.rowNumber, r.errors]));
+          this.rows.forEach(r => {
+            if (errorMap.has(r.rowNumber)) {
+              r.errors = errorMap.get(r.rowNumber)!;
+              r.hasError = true;
+            } else {
+              r.errors = [];
+              r.hasError = false;
+            }
+          });
+    
+          const successCount = res.rows.filter(r => !r.errors?.length).length;
+          const failedCount = res.rows.filter(r => r.errors?.length).length;
+    
+          //var msgcommon = `${successCount} row(s) saved successfully. ${failedCount} row(s) failed validation in the database — fix the highlighted rows in Excel and reupload.`;
+          this.submitSuccess = false;
+          this.submitMessage = res.resultMessage +' <br/> '+ `${successCount} row(s) saved successfully. ${failedCount} row(s) failed validation in the database — fix the highlighted rows in Excel and reupload.`;
+            
+        } else {
+          this.submitSuccess = true;
+          this.submitMessage = `All ${res.rows.length} row(s) saved successfully.`;
+        }
+      },
+      error: (err) => {
+        this.isSubmitting = false;
+        this.submitSuccess = false;
+        this.submitMessage = 'Upload failed: could not reach the API.';
+        console.error(err);
+      }
+    });
+    
+  }
+
+  private resetGrid(): void {
+    this.templateError = null;
+    this.rows = [];
+    this.columns = [];
+    this.submitMessage = null;
+    this.submitSuccess = false;
+  }
+
+  close(): void {
+    this.closed.emit(this.submitSuccess);
+  }
+
+  downloadTemplate(): void {
+    debugger;
+    if (this.selectedType === 1) {
+      this.downloadBlankTemplate();
+    } else {
+      this.downloadExtractedTemplate();
+    }
+  }
+
+  private downloadBlankTemplate(): void {
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Budget Data');
+    
+    // First header row
+    worksheet.addRow([
+      'Sr No',
+      'Budget Code',
+      'Indus Coverage Group',
+      'Pitched / Is Mandated',
+      'Project Name',
+      'Mandated Company',
+      'Industry',
+      'Product',
+      'Issue Type',
+      'Indicative Deal Size (Rs Cr)',
+      'Estimated Fee Pool (%)',
+      'Total Fees (Rs Cr)',
+      'No. of BRLMs',
+      'JMF Keep Rate (%)',
+      'JMF Gross Fee (Rs Cr)',
+      'Deal Probability (%)',
+      'JM Probability (%)',
+      'Expected Closure',
+      '',   // leave blank, will set after merge
+      '',   // leave blank, will set after merge
+      ''    // leave blank, will set after merge
+    ]);
+    
+    // Second header row (sub‑columns for merged headers)
+    worksheet.addRow([
+      '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '',
+      'Q1', 'Q2', 'Q3', 'Q4', 'Total',  // under JMF PWR
+      'Quarter', 'Amount',              // under Left Lead
+      'Is Mannual Calculation'                                // Is Manual Calculation stays merged
+    ]);
+    
+    // Merge the first 18 columns vertically (row1 + row2)
+    for (let col = 1; col <= 18; col++) {
+      const colLetter = worksheet.getColumn(col).letter;
+      worksheet.mergeCells(`${colLetter}1:${colLetter}2`);
+    }
+    
+    // JMF PWR (Rs Cr) across 5 columns
+    worksheet.mergeCells('S1:W1');
+    worksheet.getCell('S1').value = 'JMF PWR (Rs Cr)';
+    
+    // Left Lead across 2 columns (Quarter + Amount)
+    worksheet.mergeCells('X1:Y1');
+    worksheet.getCell('X1').value = 'Left Lead';
+    
+    // Is Manual Calculation across 2 rows
+    worksheet.mergeCells('Z1:Z2');
+    worksheet.getCell('Z1').value = 'Is Mannual Calculation';
+    
+    // Style headers
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(2).font = { bold: true };
+    worksheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' };
+    worksheet.getRow(2).alignment = { vertical: 'middle', horizontal: 'center' };
+    
+ 
+
+    worksheet.columns.forEach((column: any) => {
+      let maxLength = 0;
+      column.eachCell({ includeEmpty: true }, (cell:any) => {
+        const cellValue = cell.value ? cell.value.toString() : '';
+        maxLength = Math.max(maxLength, cellValue.length);
+      });
+      column.width = maxLength + 2; // add padding
+    });
+
+    worksheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    worksheet.getRow(2).alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+
+    ['S1','X1'].forEach(cell => {
+      worksheet.getCell(cell).alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    });
+
+    // Style headers row 1 and row 2
+      [1, 2].forEach(rowNumber => {
+        const row = worksheet.getRow(rowNumber);
+        row.eachCell(cell => {
+          // Bold font
+          cell.font = { bold: true };
+
+          // Center alignment + wrap text
+          cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+
+          // Background color
+          cell.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFD9E1F2' } // light blue shade
+          };
+
+          // Border around each cell
+          cell.border = {
+            top: { style: 'thin' },
+            left: { style: 'thin' },
+            bottom: { style: 'thin' },
+            right: { style: 'thin' }
+          };
+        });
+      });
+
+      // Style merged header cells individually
+      ['S1','X1'].forEach(cellAddress => {
+        const cell = worksheet.getCell(cellAddress);
+        cell.font = { bold: true };
+        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFB6D7A8' } // light green shade
+        };
+        cell.border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' }
+        };
+      }
+      );
+      // Apply border + optional background to each cell in the data row
+         // Example data row
+    const dataRow = worksheet.addRow([
+      1, '', 'Consumer', 'Pitched', 'Ganesh Tech', '',
+      'Digital Marketing', 'Capital Market', 'IPO', 500, 25, 0, 4, 25, 0,
+      90, 80, 'Q2',
+      0, 0, 0, 0, 0, // JMF PWR values
+      'Q1', 5,             // Left Lead values
+      'NO'                 // Is Manual Calculation
+    ]);
+
+      worksheet.getColumn(11).numFmt = '0"%"'; // Estimated Fee Pool (%)
+      //worksheet.getColumn(14).numFmt = '0"%"'; // JMF Keep Rate (%)
+      worksheet.getColumn(16).numFmt = '0"%"'; // Deal Probability (%)
+      worksheet.getColumn(17).numFmt = '0"%"'; // JM Probability (%)
+
+ debugger
+      
+    dataRow.eachCell(cell => {
+      cell.border = {
+        top: { style: 'thin' },
+        left: { style: 'thin' },
+        bottom: { style: 'thin' },
+        right: { style: 'thin' }
+      };
+      cell.alignment = { vertical: 'middle', horizontal: 'center' };
+    
+      // Optional: zebra striping (alternate row colors)
+      cell.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFF2F2F2' } // light gray background
+      };
+    });
+
+    // Formula cell locked
+    const totalfeeCell = dataRow.getCell(12);
+    totalfeeCell.value = {
+      formula: `${dataRow.getCell(10).address}*${dataRow.getCell(11).address}`,
+      result: Number(dataRow.getCell(10).value ?? 0) * Number(dataRow.getCell(11).value ?? 0)
+    };
+    totalfeeCell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFF00' } // Yellow background
+    };
+
+    const jmfkeeprateCell = dataRow.getCell(14);
+    jmfkeeprateCell.value = {
+      formula: `1/${dataRow.getCell(13).address}`,
+      result: 1/Number(dataRow.getCell(13).value ?? 0)
+    };
+    jmfkeeprateCell.numFmt = '0%';
+
+    jmfkeeprateCell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFF00' } // Yellow background
+    };
+
+    const jmfgrossfeesCell = dataRow.getCell(15);
+    jmfgrossfeesCell.value = {
+      formula: `${dataRow.getCell(12).address}*${dataRow.getCell(14).address}`,
+      result: this.getNumericValue(dataRow.getCell(12)) * this.getNumericValue(dataRow.getCell(14))
+    };
+    jmfgrossfeesCell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFF00' } // Yellow background
+    };
+    
+    const num25 = this.getNumericValue(dataRow.getCell(25));
+    const jmfpwrCellTotal = dataRow.getCell(23);
+    jmfpwrCellTotal.value = {
+      formula:`(${dataRow.getCell(15).address}*${dataRow.getCell(16).address}*${dataRow.getCell(17).address})+${dataRow.getCell(25).address}`,
+      result:Number(dataRow.getCell(15).value ?? 0) * Number(dataRow.getCell(16).value ?? 0) * Number(dataRow.getCell(17).value ?? 0)+num25
+    };
+    jmfpwrCellTotal.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFF00' } // Yellow background
+    };
+
+    const colR = `$R${dataRow.number}`;
+    const colW = `$W${dataRow.number}`;
+    const colY = `$Y${dataRow.number}`;
+
+    const Q1Cell = dataRow.getCell(19);
+    const headerValueQ1 = `S$2`;
+    Q1Cell.value = {
+      formula: `=IF(${colR}=${headerValueQ1},${colW}-${colY},0)`,
+      result: (String(dataRow.getCell(18).value ?? "") === String(worksheet.getCell('S2').value ?? ""))
+        ? Number(dataRow.getCell(23).value ?? 0)-num25: 0
+    };        
+    Q1Cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFF00' } // Yellow background
+    };
+    
+    const Q2Cell = dataRow.getCell(20);
+    const headerValueQ2 = `T$2`;
+    Q2Cell.value = {
+      formula: `=IF(${colR}=${headerValueQ2},${colW}-${colY},0)`,
+      result: (String(dataRow.getCell(18).value ?? "") === String(worksheet.getCell('T2').value ?? ""))
+        ? Number(dataRow.getCell(23).value ?? 0)-num25: 0
+    };       
+    Q2Cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFF00' } // Yellow background
+    };
+
+    const Q3Cell = dataRow.getCell(21);
+    const headerValueQ3 = `U$2`;
+    Q3Cell.value = {
+      formula: `=IF(${colR}=${headerValueQ3},${colW}-${colY},0)`,
+      result: (String(dataRow.getCell(18).value ?? "") === String(worksheet.getCell('U2').value ?? ""))
+        ? Number(dataRow.getCell(23).value ?? 0)-num25: 0
+    };       
+    Q3Cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFF00' } // Yellow background
+    };
+
+    const Q4Cell = dataRow.getCell(22);
+    const headerValueQ4 = `V$2`;
+    Q4Cell.value = {
+      formula: `=IF(${colR}=${headerValueQ4},${colW}-${colY},0)`,
+      result: (String(dataRow.getCell(18).value ?? "") === String(worksheet.getCell('V2').value ?? ""))
+        ? Number(dataRow.getCell(23).value ?? 0)-num25: 0
+    };       
+    Q4Cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFF00' } // Yellow background
+    };
+
+    const budgeCode = dataRow.getCell(2);
+    budgeCode.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFF00' } // Yellow background
+    };
+
+    // Export
+    workbook.xlsx.writeBuffer().then((buffer) => {
+      saveAs(new Blob([buffer]), 'BudgetData.xlsx');
+    });
+    
+
+  }
+
+  getNumericValue(cell: ExcelJS.Cell): number {
+    const val = cell.value;
+    if (val == null) return 0;
+    if (typeof val === "object" && "result" in val) {
+      return Number(val.result ?? 0);
+    }
+    return Number(val);
+  }
+  
+
+  private downloadExtractedTemplate(): void {
+    if (!this.parentData.fycode) return;
+    this.extracting = true;
+    this.serverMessage = null;
+  debugger;
+    this.uploadService.extractTemplate(this.selectedType, this.parentData.fycode, this.parentData.quartercode).subscribe({
+      next: rows => {
+        this.extracting = false;
+        if (!rows.length) {
+          this.serverSuccess = false;
+          this.serverMessage = 'Nothing to extract yet — no Budget entries exist for this Financial Year.';
+          return;
+        }
+  
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Budget Data');
+  
+        // First header row
+        worksheet.addRow([
+          'Sr No','Budget Code','Indus Coverage Group','Pitched / Is Mandated',
+          'Project Name','Mandated Company','Industry','Product','Issue Type',
+          'Indicative Deal Size (Rs Cr)','Estimated Fee Pool (%)','Total Fees (Rs Cr)',
+          'No. of BRLMs','JMF Keep Rate (%)','JMF Gross Fee (Rs Cr)',
+          'Deal Probability (%)','JM Probability (%)','Expected Closure',
+          '','', '' // placeholders for merged headers
+        ]);
+  
+        // Second header row
+        worksheet.addRow([
+          '','','','','','','','','','','','','','','','','','',
+          'Q1','Q2','Q3','Q4','Total',
+          'Quarter','Amount',
+          '' // Is Manual Calculation stays merged
+        ]);
+  
+        // Merge headers
+        for (let col = 1; col <= 18; col++) {
+          const colLetter = worksheet.getColumn(col).letter;
+          worksheet.mergeCells(`${colLetter}1:${colLetter}2`);
+        }
+        worksheet.mergeCells('S1:W1'); worksheet.getCell('S1').value = 'JMF PWR (Rs Cr)';
+        worksheet.mergeCells('X1:Y1'); worksheet.getCell('X1').value = 'Left Lead';
+        worksheet.mergeCells('Z1:Z2'); worksheet.getCell('Z1').value = 'Is Manual Calculation';
+  
+        // Style headers
+        [1,2].forEach(rowNumber => {
+          const row = worksheet.getRow(rowNumber);
+          row.eachCell(cell => {
+            cell.font = { bold: true };
+            cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9E1F2' } };
+            cell.border = { top:{style:'thin'}, left:{style:'thin'}, bottom:{style:'thin'}, right:{style:'thin'} };
+          });
+        });
+  
+        // Style merged header cells individually
+        ['S1','X1','Z1'].forEach(addr => {
+          const cell = worksheet.getCell(addr);
+          cell.font = { bold: true };
+          cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFB6D7A8' } };
+          cell.border = { top:{style:'thin'}, left:{style:'thin'}, bottom:{style:'thin'}, right:{style:'thin'} };
+        });
+  
+        // Add dynamic rows from API
+
+        rows.forEach((r: BulkUploadRow, idx: number) => {
+          const dataRow = worksheet.addRow([
+            idx+1, r.budgetCode, r.indusCoverageGroup, r.pitchedOrMandated,
+            r.projectName, r.mandatedCompany, r.industry, r.product, r.issueType,
+            r.indicativeDealSize, r.estimatedFeePool, r.totalFees, r.noOfBRLMs,
+            r.jmfKeepRate, r.jmfGrossFee, r.dealProbability, r.jmProbability,
+            r.expectedClosure,
+            r.q1, r.q2, r.q3, r.q4, r.total,
+            'Q' + this.parentData.quartercode, r.amount,
+            r.isManualCalculation ?? '' // if you have this field
+          ]);
+  
+          // Style each data row
+          dataRow.eachCell(cell => {
+            cell.border = { top:{style:'thin'}, left:{style:'thin'}, bottom:{style:'thin'}, right:{style:'thin'} };
+            cell.alignment = { vertical:'middle', horizontal:'center' };
+            // Optional zebra striping
+            cell.fill = {
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: { argb: dataRow.number % 2 === 0 ? 'FFFFFFFF' : 'FFF2F2F2' }
+            };
+          });
+
+          
+
+          // Allow editing only for Amount (col 24)
+         // dataRow.getCell(24).protection = { locked: false };
+        });
+  
+        // Auto-size columns
+        worksheet.columns.forEach((column: any) => {
+          if (!column) return; // skip undefined columns
+          let maxLength = 0;
+          column.eachCell({ includeEmpty: true }, (cell: any) => {
+            const cellValue = cell.value ? cell.value.toString() : '';
+            maxLength = Math.max(maxLength, cellValue.length);
+          });
+          column.width = maxLength + 2;
+        });
+        
+  
+        // Export
+        workbook.xlsx.writeBuffer().then(buffer => {
+          saveAs(new Blob([buffer]), `budget-${this.selectedType === 2 ? 'estimation' : 'actual'}-extract.xlsx`);
+        });
+      },
+      error: err => {
+        this.extracting = false;
+        this.serverSuccess = false;
+        this.serverMessage = err?.error?.message || 'Extract failed. Is the API running?';
+      }
+    });
+  }
+  
+
+}
+-------
+<div class="modal-backdrop">
+  <div class="modal-panel" (click)="$event.stopPropagation()" >
+
+    <div class="modal-header">
+      <h2>Upload Data <span class="from" *ngIf="parentData"></span></h2>
+      <!-- <h2>Upload Data <span class="from" *ngIf="parentData">(from {{ parentData.source }})</span></h2> -->
+      <button class="icon-btn" (click)="close()" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="modal-body">
+      <div class="upload-config">
+      <div class="entry-type-tabs">
+        <label  class="entry-type-tab" [class.active]="selectedType === 1">
+          <input type="radio" name="type" [value]="1" [(ngModel)]="selectedType" />
+          Budget
+        </label>
+        <label class="entry-type-tab" [class.active]="selectedType === 2">
+          <input type="radio" name="type" [value]="2" [(ngModel)]="selectedType" />
+          Estimated
+        </label>
+        <label class="entry-type-tab" [class.active]="selectedType === 3">
+          <input type="radio" name="type" [value]="3" [(ngModel)]="selectedType" />
+          Actual
+        </label>
+      </div>
+
+      <button class="btn btn-ghost" [disabled]="extracting" (click)="downloadTemplate()">
+        {{ extracting ? 'Extracting…' : (selectedType === 1 ? 'Download Template' : 'Extract Current Data') }}
+      </button>
+    </div>
+
+      <div class="form-row file-row">
+        <input type="file" accept=".xlsx,.xls" (change)="onFileSelected($event)" />
+        <button class="btn-secondary" [disabled]="!selectedFile || isValidating" (click)="validateExcel()">
+          {{ isValidating ? 'Validating...' : 'Validate Excel' }}
+        </button>
+      </div>
+
+      <div class="error-banner" *ngIf="templateError">
+        {{ templateError }}
+      </div>
+
+      <div *ngIf="rows.length">
+        <p class="summary-line">
+          {{ rows.length }} row(s) found.
+          <span class="error-text" *ngIf="hasClientErrors">
+            {{ errorRowCount }} row(s) have issues — fix in Excel and reupload.
+          </span>
+          <span class="ok-text" *ngIf="!hasClientErrors">All rows passed client-side validation.</span>
+        </p>
+
+        <div class="grid-wrapper">
+          <table>
+            <thead>
+              <!-- First header row -->
+              <tr>
+                <th rowspan="2">Row#</th>
+                <ng-container *ngFor="let col of columns">
+                  <ng-container [ngSwitch]="col">
+                    <!-- Group headers -->
+                    <th *ngSwitchCase="'Q1'" colspan="5" class="group-header">JMF PWR (Rs Cr)</th>
+                    <th *ngSwitchCase="'Quarter'" colspan="2" class="group-header">Left Lead</th>
+          
+                    <!-- Normal headers (skip grouped children here) -->
+                    <ng-container *ngSwitchDefault>
+                      <th rowspan="2"
+                          *ngIf="!['Q1','Q2','Q3','Q4','Total','Quarter','Amount'].includes(col)">
+                        {{ col }}
+                      </th>
+                    </ng-container>
+                  </ng-container>
+                </ng-container>
+                <th rowspan="2">Errors</th>
+              </tr>
+          
+              <!-- Second header row -->
+              <tr>
+                <!-- Child columns under JMF PWR -->
+                <ng-container *ngFor="let col of columns">
+                  <ng-container *ngIf="['Q1','Q2','Q3','Q4','Total'].includes(col)">
+                    <th>{{ col }}</th>
+                  </ng-container>
+                </ng-container>
+                <!-- Child columns under Left Lead -->
+                <ng-container *ngFor="let col of columns">
+                  <ng-container *ngIf="['Quarter','Amount'].includes(col)">
+                    <th>{{ col }}</th>
+                  </ng-container>
+                </ng-container>
+              </tr>
+            </thead>
+          
+            <tbody>
+              <tr [class.row-error]="row.hasError" *ngFor="let row of rows">
+                <td>{{ row.rowNumber }}</td>
+                <td *ngFor="let col of columns">{{ row.data[col] }}</td>
+                <td class="error-text">{{ row.errors.join('; ') }}</td>
+              </tr>
+            </tbody>
+          </table>
+          
+          
+          
+        </div>
+      </div>
+
+      <div class="submit-message" [class.success]="submitSuccess" *ngIf="submitMessage">
+        {{ submitMessage }}
+      </div>
+
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn-text" (click)="close()">Cancel</button>
+      <button class="btn-primary"
+              [disabled]="!rows.length || hasClientErrors || isSubmitting"
+              (click)="submit()">
+        {{ isSubmitting ? 'Saving...' : 'Submit' }}
+      </button>
+    </div>
+
+  </div>
+</div>
+-------------
+import { Injectable } from '@angular/core';
+import * as XLSX from 'xlsx';
+import { ExcelTemplateColumns } from 'src/app/excel-template.config';
+import { ExcelRow } from 'src/app/models/excel-row.model';
+
+export interface ParseResult {
+  templateValid: boolean;
+  templateError: string | null;
+  rows: ExcelRow[];
+  columns: string[];
+}
+
+@Injectable({ providedIn: 'root' })
+export class ExcelValidatorService {
+
+  async parseAndValidate(file: File): Promise<ParseResult> {
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+
+    const raw: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
+    if (!raw.length) {
+      return { templateValid: false, templateError: 'Excel file is empty.', rows: [], columns: [] };
+    }
+
+    const row1: string[] = (raw[0] || []).map(h => (h ?? '').toString().trim());
+    const row2: string[] = (raw[1] || []).map(h => (h ?? '').toString().trim());
+
+    // Expand merged headers into child columns
+    const headerRow: string[] = [];
+    for (let i = 0; i < row1.length; i++) {
+      const parent = row1[i];
+      const child = row2[i];
+
+      if (parent === 'JMF PWR (Rs Cr)') {
+        // Expand into Q1–Q4 + Total
+        if (child) headerRow.push(child);
+      } else if (parent === 'Left Lead') {
+        // Expand into Quarter + Amount
+        if (child) headerRow.push(child);
+      } else {
+        // Normal header
+        headerRow.push(child || parent);
+      }
+    }
+
+    const normalizedHeader = headerRow.filter(h => h && h.trim() !== '');
+
+    // Expected column names
+    debugger;
+    const expectedNames = ExcelTemplateColumns.map(c => c.name);
+
+    const missing = expectedNames.filter(n => !normalizedHeader.includes(n));
+    const extra = normalizedHeader.filter(n => !expectedNames.includes(n));
+
+    if (missing.length || extra.length) {
+      return {
+        templateValid: false,
+        templateError:
+          (missing.length ? `Missing columns: ${missing.join(', ')}. ` : '') +
+          (extra.length ? `Unexpected columns: ${extra.join(', ')}.` : ''),
+        rows: [],
+        columns: normalizedHeader
+      };
+    }
+
+    // Build row objects keyed by header name
+    const dataRows = raw.slice(2).filter(r => r.some(cell => cell !== null && cell !== ''));
+    const rows: ExcelRow[] = dataRows.map((r, idx) => {
+      const obj: Record<string, any> = {};
+      normalizedHeader.forEach((colName, i) => {
+        let val = r[i] ?? null;
+        if (val instanceof Date) {
+          val = val.toISOString().substring(0, 10);
+        }
+        obj[colName] = val;
+      });
+
+      const errors = this.validateRow(obj);
+      return {
+        rowNumber: idx + 3,
+        data: obj,
+        errors,
+        hasError: errors.length > 0
+      };
+    });
+
+    return { templateValid: true, templateError: null, rows, columns: normalizedHeader };
+  }
+
+  private validateRow(row: Record<string, any>): string[] {
+    const errors: string[] = [];
+
+    for (const col of ExcelTemplateColumns) {
+      const value = row[col.name];
+      const isEmpty = value === null || value === undefined || value.toString().trim() === '';
+
+      if (col.required && isEmpty) {
+        errors.push(`${col.name} is required`);
+        continue;
+      }
+      if (isEmpty) continue;
+
+      switch (col.type) {
+        case 'number':
+          if (isNaN(Number(value))) errors.push(`${col.name} must be a number`);
+          break;
+        case 'date':
+          if (isNaN(new Date(value).getTime())) errors.push(`${col.name} must be a valid date`);
+          break;
+        case 'string':
+          if (typeof value !== 'string' && typeof value !== 'number') {
+            errors.push(`${col.name} must be text`);
+          }
+          break;
+      }
+    }
+    return errors;
+  }
+}
+
+====================
