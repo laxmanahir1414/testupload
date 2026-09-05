@@ -2222,3 +2222,627 @@ export class BudgetEntryUploadComponent {
       });
   }
 }
+
+
+===========Laxamn
+
+import { Injectable } from '@angular/core';
+import * as XLSX from 'xlsx';
+import { ExcelTemplateColumns } from 'src/app/excel-template.config';
+import { ExcelRow } from 'src/app/models/excel-row.model';
+
+export interface ParseResult {
+  templateValid: boolean;
+  templateError: string | null;
+  rows: ExcelRow[];
+  columns: string[];
+}
+
+@Injectable({
+  providedIn: 'root'
+})
+export class ExcelValidatorService {
+
+  async parseAndValidate(file: File): Promise<ParseResult> {
+
+    const buffer = await file.arrayBuffer();
+
+    const workbook = XLSX.read(buffer, {
+      type: 'array',
+      cellDates: true
+    });
+
+    if (!workbook.SheetNames.length) {
+      return {
+        templateValid: false,
+        templateError: 'Excel file does not contain any worksheet.',
+        rows: [],
+        columns: []
+      };
+    }
+
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+
+    if (!sheet || !sheet['!ref']) {
+      return {
+        templateValid: false,
+        templateError: 'Excel worksheet is empty.',
+        rows: [],
+        columns: []
+      };
+    }
+
+    /*
+     * IMPORTANT:
+     *
+     * We are NOT using sheet_to_json() for data values.
+     *
+     * Formula cells are read directly using cell.v.
+     *
+     * SheetJS:
+     * cell.f = Formula
+     * cell.v = Calculated / cached value
+     *
+     * Example:
+     *
+     * Excel Formula:
+     * =A3*B3
+     *
+     * cell.f = "A3*B3"
+     * cell.v = 500
+     *
+     * We need cell.v for the Angular grid.
+     */
+
+    const range = XLSX.utils.decode_range(sheet['!ref']);
+
+    // ============================================================
+    // READ HEADER ROW 1
+    // ============================================================
+
+    const row1: string[] = [];
+
+    for (let columnIndex = range.s.c; columnIndex <= range.e.c; columnIndex++) {
+
+      const value = this.getCellValue(
+        sheet,
+        0,
+        columnIndex
+      );
+
+      row1.push(
+        value === null || value === undefined
+          ? ''
+          : value.toString().trim()
+      );
+    }
+
+
+    // ============================================================
+    // READ HEADER ROW 2
+    // ============================================================
+
+    const row2: string[] = [];
+
+    for (let columnIndex = range.s.c; columnIndex <= range.e.c; columnIndex++) {
+
+      const value = this.getCellValue(
+        sheet,
+        1,
+        columnIndex
+      );
+
+      row2.push(
+        value === null || value === undefined
+          ? ''
+          : value.toString().trim()
+      );
+    }
+
+
+    // ============================================================
+    // BUILD ACTUAL HEADER
+    // ============================================================
+
+    const headerRow: string[] = [];
+
+    const maxColumns = Math.max(
+      row1.length,
+      row2.length
+    );
+
+    for (let i = 0; i < maxColumns; i++) {
+
+      const parent = (row1[i] ?? '').trim();
+      const child = (row2[i] ?? '').trim();
+
+      /*
+       * JMF PWR (Rs Cr)
+       *
+       * S1:W1 merged
+       *
+       * Row 2:
+       * Q1
+       * Q2
+       * Q3
+       * Q4
+       * Total
+       */
+
+      if (parent === 'JMF PWR (Rs Cr)') {
+
+        if (child) {
+          headerRow.push(child);
+        }
+
+        continue;
+      }
+
+
+      /*
+       * Left Lead
+       *
+       * X1:Y1 merged
+       *
+       * Row 2:
+       * Quarter
+       * Amount
+       */
+
+      if (parent === 'Left Lead') {
+
+        if (child) {
+          headerRow.push(child);
+        }
+
+        continue;
+      }
+
+
+      /*
+       * Normal Columns
+       *
+       * For vertically merged headers,
+       * child will normally be blank.
+       */
+
+      const columnName = child || parent;
+
+      if (columnName) {
+        headerRow.push(columnName);
+      }
+    }
+
+
+    // ============================================================
+    // REMOVE EMPTY HEADERS
+    // ============================================================
+
+    const normalizedHeader = headerRow
+      .map(header => header.trim())
+      .filter(header => header !== '');
+
+
+    // ============================================================
+    // CHECK EMPTY TEMPLATE
+    // ============================================================
+
+    if (!normalizedHeader.length) {
+
+      return {
+        templateValid: false,
+        templateError: 'Excel template does not contain column headers.',
+        rows: [],
+        columns: []
+      };
+    }
+
+
+    // ============================================================
+    // EXPECTED COLUMNS
+    // ============================================================
+
+    const expectedNames = ExcelTemplateColumns.map(
+      column => column.name
+    );
+
+
+    const missing = expectedNames.filter(
+      column => !normalizedHeader.includes(column)
+    );
+
+
+    const extra = normalizedHeader.filter(
+      column => !expectedNames.includes(column)
+    );
+
+
+    // ============================================================
+    // TEMPLATE VALIDATION
+    // ============================================================
+
+    if (missing.length || extra.length) {
+
+      return {
+        templateValid: false,
+
+        templateError:
+
+          (missing.length
+            ? `Missing columns: ${missing.join(', ')}. `
+            : '') +
+
+          (extra.length
+            ? `Unexpected columns: ${extra.join(', ')}.`
+            : ''),
+
+        rows: [],
+
+        columns: normalizedHeader
+      };
+    }
+
+
+    // ============================================================
+    // BUILD DATA ROWS
+    //
+    // Excel Data Starts From Row 3
+    //
+    // Index:
+    // Row 1 = index 0
+    // Row 2 = index 1
+    // Row 3 = index 2
+    // ============================================================
+
+    const rows: ExcelRow[] = [];
+
+
+    for (
+      let rowIndex = 2;
+      rowIndex <= range.e.r;
+      rowIndex++
+    ) {
+
+      const obj: Record<string, any> = {};
+
+      let hasData = false;
+
+
+      // Loop through actual Excel columns
+      for (
+        let columnIndex = 0;
+        columnIndex < normalizedHeader.length;
+        columnIndex++
+      ) {
+
+        const columnName = normalizedHeader[columnIndex];
+
+
+        let value = this.getCellValue(
+          sheet,
+          rowIndex,
+          columnIndex
+        );
+
+
+        // Convert Excel date
+        if (value instanceof Date) {
+
+          value = this.formatDate(value);
+        }
+
+
+        /*
+         * Prevent NaN
+         */
+
+        if (
+          typeof value === 'number' &&
+          Number.isNaN(value)
+        ) {
+
+          value = null;
+        }
+
+
+        /*
+         * Detect actual data
+         */
+
+        if (
+          value !== null &&
+          value !== undefined &&
+          value !== ''
+        ) {
+
+          hasData = true;
+        }
+
+
+        obj[columnName] = value;
+      }
+
+
+      /*
+       * Skip completely empty rows
+       */
+
+      if (!hasData) {
+        continue;
+      }
+
+
+      // ============================================================
+      // VALIDATE ROW
+      // ============================================================
+
+      const errors = this.validateRow(obj);
+
+
+      rows.push({
+
+        /*
+         * Actual Excel row number
+         *
+         * rowIndex 2 = Excel Row 3
+         */
+
+        rowNumber: rowIndex + 1,
+
+        data: obj,
+
+        errors: errors,
+
+        hasError: errors.length > 0
+      });
+    }
+
+
+    return {
+
+      templateValid: true,
+
+      templateError: null,
+
+      rows: rows,
+
+      columns: normalizedHeader
+    };
+  }
+
+
+  // ============================================================
+  // READ EXCEL CELL VALUE
+  // ============================================================
+
+  private getCellValue(
+    sheet: XLSX.WorkSheet,
+    rowIndex: number,
+    columnIndex: number
+  ): any {
+
+    const cellAddress = XLSX.utils.encode_cell({
+
+      r: rowIndex,
+
+      c: columnIndex
+    });
+
+
+    const cell = sheet[cellAddress];
+
+
+    if (!cell) {
+      return null;
+    }
+
+
+    /*
+     * Formula cell example:
+     *
+     * cell.f = A3*B3
+     * cell.v = 100
+     *
+     * We ALWAYS return cell.v.
+     *
+     * This is the calculated value saved in Excel.
+     */
+
+    if (cell.f) {
+
+      if (
+        cell.v !== undefined &&
+        cell.v !== null
+      ) {
+
+        return cell.v;
+      }
+
+
+      /*
+       * Formula exists but Excel has not
+       * saved/calculated a result.
+       *
+       * ExcelJS / SheetJS does not calculate
+       * Excel formulas automatically.
+       */
+
+      return null;
+    }
+
+
+    /*
+     * Normal Cell
+     */
+
+    if (
+      cell.v !== undefined &&
+      cell.v !== null
+    ) {
+
+      return cell.v;
+    }
+
+
+    return null;
+  }
+
+
+  // ============================================================
+  // DATE FORMAT
+  // ============================================================
+
+  private formatDate(date: Date): string {
+
+    const year = date.getFullYear();
+
+    const month = String(
+      date.getMonth() + 1
+    ).padStart(2, '0');
+
+    const day = String(
+      date.getDate()
+    ).padStart(2, '0');
+
+
+    return `${year}-${month}-${day}`;
+  }
+
+
+  // ============================================================
+  // VALIDATE ROW
+  // ============================================================
+
+  private validateRow(
+    row: Record<string, any>
+  ): string[] {
+
+    const errors: string[] = [];
+
+
+    for (const column of ExcelTemplateColumns) {
+
+      const value = row[column.name];
+
+
+      // ============================================================
+      // CHECK EMPTY
+      // ============================================================
+
+      const isEmpty =
+
+        value === null ||
+
+        value === undefined ||
+
+        value === '' ||
+
+        (
+          typeof value === 'string' &&
+          value.trim() === ''
+        );
+
+
+      // ============================================================
+      // REQUIRED
+      // ============================================================
+
+      if (
+        column.required &&
+        isEmpty
+      ) {
+
+        errors.push(
+          `${column.name} is required`
+        );
+
+        continue;
+      }
+
+
+      /*
+       * Skip validation for optional empty fields
+       */
+
+      if (isEmpty) {
+        continue;
+      }
+
+
+      // ============================================================
+      // VALIDATE TYPE
+      // ============================================================
+
+      switch (column.type) {
+
+
+        // ============================================================
+        // NUMBER
+        // ============================================================
+
+        case 'number':
+
+          const numericValue = Number(value);
+
+
+          if (
+            Number.isNaN(numericValue)
+          ) {
+
+            errors.push(
+              `${column.name} must be a number`
+            );
+          }
+
+          break;
+
+
+        // ============================================================
+        // DATE
+        // ============================================================
+
+        case 'date':
+
+          const dateValue = new Date(value);
+
+
+          if (
+            Number.isNaN(dateValue.getTime())
+          ) {
+
+            errors.push(
+              `${column.name} must be a valid date`
+            );
+          }
+
+          break;
+
+
+        // ============================================================
+        // STRING
+        // ============================================================
+
+        case 'string':
+
+          if (
+
+            typeof value !== 'string' &&
+
+            typeof value !== 'number'
+
+          ) {
+
+            errors.push(
+              `${column.name} must be text`
+            );
+          }
+
+          break;
+      }
+    }
+
+
+    return errors;
+  }
+}
+
